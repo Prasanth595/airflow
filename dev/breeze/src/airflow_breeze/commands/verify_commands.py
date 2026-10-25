@@ -108,8 +108,14 @@ def run_verification_commands(commands: list[str]) -> list[int]:
     try:
         for index, command in enumerate(commands, start=1):
             get_console().print(f"\n[info]({index}/{len(commands)}) {escape(command)}[/]\n", soft_wrap=True)
+            # Keep the listed commands (e.g. "--backend none") from overwriting the choices breeze saved.
             return_codes.append(
-                run_command(["bash", "-c", command], check=False, cwd=AIRFLOW_ROOT_PATH).returncode
+                run_command(
+                    ["bash", "-c", command],
+                    check=False,
+                    cwd=AIRFLOW_ROOT_PATH,
+                    env={"SKIP_SAVING_CHOICES": "true"},
+                ).returncode
             )
     except KeyboardInterrupt:
         pass

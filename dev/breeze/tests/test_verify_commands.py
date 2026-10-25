@@ -392,7 +392,10 @@ def test_verification_commands_run_in_a_shell_and_carry_on_after_a_failure(mock_
         ["bash", "-c", "false"],
         ["bash", "-c", "cd dev && true"],
     ]
-    assert all(call.kwargs == {"check": False, "cwd": AIRFLOW_ROOT_PATH} for call in mock_run.call_args_list)
+    assert all(
+        call.kwargs == {"check": False, "cwd": AIRFLOW_ROOT_PATH, "env": {"SKIP_SAVING_CHOICES": "true"}}
+        for call in mock_run.call_args_list
+    )
 
 
 @patch("airflow_breeze.commands.verify_commands.run_command", autospec=True)

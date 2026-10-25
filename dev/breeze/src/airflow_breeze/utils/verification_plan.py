@@ -21,6 +21,7 @@ import shlex
 from dataclasses import asdict, dataclass
 from typing import Any
 
+from airflow_breeze.global_constants import DEFAULT_PYTHON_MAJOR_MINOR_VERSION
 from airflow_breeze.utils.selective_checks import SelectiveChecks
 
 
@@ -46,7 +47,15 @@ FLAG_COMMANDS: dict[str, tuple[tuple[str, str, str], ...]] = {
             "host",
         ),
     ),
-    "run_api_codegen": (("schema", "breeze testing python-api-client-tests", "breeze"),),
+    "run_api_codegen": (
+        (
+            "schema",
+            f"UV_PYTHON={DEFAULT_PYTHON_MAJOR_MINOR_VERSION} breeze release-management prepare-python-client "
+            "--distribution-format both",
+            "breeze",
+        ),
+        ("schema", "breeze testing python-api-client-tests --backend sqlite", "breeze"),
+    ),
     "run_go_sdk_tests": (
         ("unit", "cd go-sdk && go test ./...", "host"),
         ("unit", "cd go-sdk && go test -race ./...", "host"),
@@ -119,7 +128,7 @@ def build_unit_test_items(group: str, test_types_json: str | None) -> list[Verif
     return [
         VerificationItem(
             "unit",
-            f"{prefix} --run-in-parallel --run-db-tests-only --parallel-test-types {shlex.quote(test_types)}",
+            f"{prefix} --run-in-parallel --run-db-tests-only --backend sqlite --parallel-test-types {shlex.quote(test_types)}",
             "breeze",
         ),
         VerificationItem(
