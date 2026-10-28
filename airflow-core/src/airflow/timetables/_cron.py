@@ -31,6 +31,27 @@ if TYPE_CHECKING:
     from pendulum.tz.timezone import FixedTimezone, Timezone
 
 
+# A wall-clock gap larger than one hour (e.g. ``0 * * * 1-5`` across a weekend) is not elapsed time
+# when a DST transition falls inside it, so only gaps up to this limit may be added to ``current``.
+_FOLD_DELTA_LIMIT = datetime.timedelta(hours=1)
+
+
+def _localize_all_folds(naive: datetime.datetime, timezone: Timezone | FixedTimezone) -> list[DateTime]:
+    """
+    Return every UTC instant a naive wall-clock time maps to, earliest first.
+
+    A wall-clock time inside a fall-back fold occurs twice, but ``make_aware`` only returns the later one.
+    A time skipped by a spring-forward gap never occurs, so it maps to nothing.
+    """
+    first = timezone.convert(naive.replace(fold=0))
+    second = timezone.convert(naive.replace(fold=1))
+    if first.replace(tzinfo=None) != naive:
+        return []
+    if first.utcoffset() != second.utcoffset():
+        return [convert_to_utc(first), convert_to_utc(second)]
+    return [convert_to_utc(first)]
+
+
 def _covers_every_hour(cron: croniter) -> bool:
     """
     Check whether the given cron runs at least once an hour.
@@ -160,9 +181,15 @@ class CronMixin:
         scheduled = cron.get_next(datetime.datetime)
         if TYPE_CHECKING:
             assert isinstance(scheduled, datetime.datetime)
+        delta = scheduled - naive
         if not _covers_every_hour(cron):
             return convert_to_utc(make_aware(scheduled, self._timezone))
-        delta = scheduled - naive
+        if delta > _FOLD_DELTA_LIMIT:
+            while not (
+                candidates := [c for c in _localize_all_folds(scheduled, self._timezone) if c > current]
+            ):
+                scheduled = cron.get_next(datetime.datetime)
+            return min(candidates)
         return convert_to_utc(current.in_timezone(self._timezone) + delta)
 
     def _get_prev(self, current: DateTime) -> DateTime:
@@ -172,6 +199,7 @@ class CronMixin:
         scheduled = cron.get_prev(datetime.datetime)
         if TYPE_CHECKING:
             assert isinstance(scheduled, datetime.datetime)
+        delta = naive - scheduled
         if not _covers_every_hour(cron):
             prev = convert_to_utc(make_aware(scheduled, self._timezone))
             # croniter steps back on naive wall clock, but make_aware can map a tick inside
@@ -181,7 +209,12 @@ class CronMixin:
                 scheduled = cron.get_prev(datetime.datetime)
                 prev = convert_to_utc(make_aware(scheduled, self._timezone))
             return prev
-        delta = naive - scheduled
+        if delta > _FOLD_DELTA_LIMIT:
+            candidates = [c for c in _localize_all_folds(scheduled, self._timezone) if c < current]
+            while not candidates:
+                scheduled = cron.get_prev(datetime.datetime)
+                candidates = [c for c in _localize_all_folds(scheduled, self._timezone) if c < current]
+            return max(candidates)
         return convert_to_utc(current.in_timezone(self._timezone) - delta)
 
     def _align_to_next(self, current: DateTime) -> DateTime:
