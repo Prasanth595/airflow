@@ -1310,6 +1310,8 @@ class ReprocessBehavior(str, Enum):
     FAILED = "failed"
     COMPLETED = "completed"
     NONE = "none"
+    FAILED_TASKS = "failed_tasks"
+    NEW_TASKS = "new_tasks"
 
 
 class SchedulerInstanceInfoResponse(BaseModel):
