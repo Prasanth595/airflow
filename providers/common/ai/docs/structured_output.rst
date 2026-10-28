@@ -24,6 +24,7 @@ Set ``output_type`` to a Pydantic ``BaseModel`` subclass. The LLM is instructed
 to return structured data, and the model instance is pushed to XCom unchanged
 so downstream tasks can type-hint the class directly
 (``def downstream(result: MyModel)``) and use attribute access (``result.field``).
+Inside a list of types (``[MyModel, int]``) the model is pushed as a ``dict`` instead.
 
 The declared ``output_type`` (and any ``BaseModel`` reachable from
 ``Union``/``Optional``/``list[...]`` types) is registered for XCom deserialization by
@@ -34,6 +35,8 @@ classes nested inside a function or ``@dag``-decorated body, parameterized
 generics, and dynamically-built classes whose ``__name__`` does not match the
 attribute they are bound to cannot be re-imported, so they are skipped with a
 warning at worker startup and the value fails to deserialize at the consumer.
+A list of types (``output_type=[MyModel, int]``) registers no class, so the operator pushes the
+model as a ``dict`` even when ``serialize_output`` is ``False``.
 
 .. exampleinclude:: /../../ai/src/airflow/providers/common/ai/example_dags/example_llm.py
     :language: python
@@ -53,7 +56,8 @@ cache that bypasses operator construction.
 The worker finds no class to register when ``output_type`` is a list of output
 types such as ``[Summary, int]``, an output marker such as
 ``ToolOutput(Summary)``, an output function, a ``TypeAliasType`` or a
-``NewType``. For these output types, ``AgentOperator`` and ``@task.agent`` push
+``NewType``. For these output types, ``LLMOperator``, ``@task.llm``,
+``LLMFileAnalysisOperator``, ``AgentOperator`` and ``@task.agent`` push
 each model in the output as a JSON-compatible dict, including models inside a
 list, tuple or dict. A model is pushed as a dict even if its class is listed in
 ``[core] allowed_deserialization_classes``, or if another task in the same Dag
@@ -72,14 +76,18 @@ Python object. The default XCom backend cannot serialize these objects, so the
 XCom push fails with ``TypeError``. Before Airflow 3.3 the worker registers no
 model class. ``AgentOperator`` and ``@task.agent`` therefore push a model
 inside a list, tuple or dict as a JSON-compatible dict for every
-``output_type``, not only for the output types listed above.
+``output_type``, not only for the output types listed above. ``LLMOperator``,
+``@task.llm`` and ``LLMFileAnalysisOperator`` do not: before Airflow 3.3 they
+push ``list[MyModel]`` and other containers of models as instances.
 
 Upgrading from common.ai 1.0.0 or 1.1.0 can change the type that a downstream
 task receives:
 
 * On Airflow 3.3 and later, common.ai 1.0.0 and 1.1.0 pushed each model in the
   output as a model instance when ``output_type`` was one of the output types
-  listed above. They dumped a top-level model with plain ``model_dump()`` only
+  listed above. This applies to ``LLMOperator``, ``@task.llm``,
+  ``LLMFileAnalysisOperator``, ``AgentOperator`` and ``@task.agent``. They
+  dumped a top-level model with plain ``model_dump()`` only
   when ``serialize_output=True`` was set or in HITL review. A downstream task
   loaded the instance when the class was listed in
   ``[core] allowed_deserialization_classes`` or when another task in the same
@@ -94,7 +102,9 @@ task receives:
 * Before Airflow 3.3, common.ai 1.0.0 and 1.1.0 pushed a model inside a list,
   tuple or dict as a model instance, for every ``output_type``. A downstream
   task that loaded the instance because the class was listed in
-  ``[core] allowed_deserialization_classes`` now gets a dict.
+  ``[core] allowed_deserialization_classes`` now gets a dict when it comes from
+  ``AgentOperator`` or ``@task.agent``. ``LLMOperator``, ``@task.llm`` and
+  ``LLMFileAnalysisOperator`` still push ``list[MyModel]`` as instances there.
 
 The Airflow UI's XCom viewer renders Pydantic instances via the
 ``stringify`` path, which produces a representation like
@@ -109,5 +119,40 @@ class is not auto-registered. Add the class qualified name to
 that pattern work.
 
 If a downstream consumer needs the dict shape (e.g. forwarding to an external
-system that expects JSON-style payloads), pass ``serialize_output=True`` and the
-operator calls ``model_dump()`` before pushing to XCom.
+system that expects JSON-style payloads), the operator can push the model dumped
+instead of as an instance. Whether it does depends on ``serialize_output``:
+
+* With ``serialize_output=True``, an output that is itself a model is dumped with ``model_dump()``, so
+  field types such as ``date`` and ``Decimal`` are kept.
+* A model inside a list, tuple, set or dict is not dumped when the worker registers its class
+  (``output_type=list[MyModel]``). The XCom serializer pushes it as an instance, with or without
+  ``serialize_output``.
+* A model whose class the worker cannot register is dumped to JSON values, whatever ``serialize_output``
+  says. The one exception is a model that is itself the output when ``serialize_output=True``: it is
+  still dumped, but in Python mode as the first bullet describes. The worker registers the classes it
+  finds by reading ``output_type``, and finds none in a list of types such as
+  ``output_type=[MyModel, int]``, so a ``MyModel`` output of that shape is dumped.
+* ``LLMOperator`` and ``LLMFileAnalysisOperator`` dump the whole output with ``to_jsonable_python``,
+  using field names rather than aliases, as soon as it holds such a model in a list, tuple, set or
+  dict, as a set member or as a dict key.
+* ``AgentOperator`` dumps each such model with ``model_dump(mode="json")``, as the output itself or
+  inside a list, tuple or dict values. It does not look inside a set, a frozenset or a dict key, so a
+  model there is pushed as it is.
+
+The two dumps differ in these cases:
+
+* A model whose config sets ``serialize_by_alias=True`` is dumped by field name (``full_name``) by the LLM operators.
+  ``AgentOperator`` dumps it by alias (``fullName``).
+* In a tuple, list or dict next to a model, a ``date`` or ``Decimal`` becomes a string for the LLM
+  operators, because they dump the whole output. ``AgentOperator`` dumps only the models and leaves it
+  as it is.
+* In a mixed output, ``AgentOperator`` keeps the models whose class the worker registers as instances
+  and dumps only the others. The LLM operators dump the whole output as soon as one model is not
+  registered.
+* Before Airflow 3.3, ``AgentOperator`` dumps the models inside a list, tuple or dict. The LLM
+  operators push such a container as it is, and dump only a model that is itself the output.
+
+In a dump to JSON values, ``HttpUrl``, ``Path`` and ``Enum`` fields become plain JSON values. A model
+that is itself the output with ``serialize_output=True`` keeps its Python field values instead, so an
+``HttpUrl``, a ``Path`` or a plain ``Enum`` member in it stays an object that the default XCom backend
+cannot serialize.

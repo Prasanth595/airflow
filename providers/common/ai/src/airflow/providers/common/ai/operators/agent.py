@@ -101,6 +101,8 @@ except ImportError:  # pragma: no cover - missing ``apache-airflow-task-sdk`` wa
     _CORE_WALKER = False
 
 if TYPE_CHECKING:
+    from types import UnionType
+
     import jinja2
     from pydantic_ai import Agent
     from pydantic_ai.capabilities import AgentCapability
@@ -296,10 +298,14 @@ class AgentOperator(CancellableAgentRunMixin, BaseOperator, HITLReviewMixin, Usa
         :class:`~airflow.providers.common.ai.hooks.pydantic_ai.PydanticAIHook`
         for how blank entries in the list are dropped.
     :param system_prompt: System-level instructions for the agent.
-    :param output_type: Expected output type. Default ``str``. Set to a Pydantic
-        ``BaseModel`` subclass for structured output; the model instance is
+    :param output_type: Expected output type. Default ``str``. A single type
+        (``str``, ``int``, ``list[str]``, a Pydantic ``BaseModel`` subclass) or a
+        union (``A | B``). A list of types (``[str, int]``) is also accepted and treated
+        as alternatives (a union). For a ``BaseModel`` subclass, the model instance is
         returned to XCom unchanged so downstream tasks can type-hint it
-        directly. The class must be defined at module scope -- nested classes
+        directly, except inside a list of types, where it is returned as a ``dict``
+        because the worker registers only the classes it finds in a single type or a union.
+        The class must be defined at module scope -- nested classes
         cannot be deserialized from XCom.
     :param toolsets: List of pydantic-ai toolsets the agent can use
         (e.g. ``SQLToolset``, ``HookToolset``). The connection IDs of
@@ -490,11 +496,15 @@ class AgentOperator(CancellableAgentRunMixin, BaseOperator, HITLReviewMixin, Usa
     :param tool_approval_assigned_users: Users allowed to decide. ``None`` (default)
         leaves it to anyone who can act on the task's Required Actions.
 
-    :param serialize_output: If ``True`` and ``output_type`` is a Pydantic
-        ``BaseModel`` subclass, the model instance is dumped to a ``dict`` via
-        ``model_dump()`` before being pushed to XCom. Default ``False`` --
-        the Pydantic instance flows through XCom unchanged. Set to ``True``
-        when a downstream consumer needs the dict shape.
+    :param serialize_output: If ``True``, an output that is itself a Pydantic ``BaseModel`` is dumped with
+        ``model_dump()`` before being pushed to XCom, so ``date`` and ``Decimal`` fields keep their
+        types. A model inside a list, tuple or dict is left for the XCom serializer when the worker
+        registers its class. A model whose class the worker cannot register from ``output_type``
+        (for example ``[MyModel, int]``, an output marker or function, a ``TypeAliasType`` or a
+        ``NewType``) is dumped with ``model_dump(mode="json")``: always when it is inside a list,
+        tuple or dict, and as the output itself when this is ``False``. Default ``False`` -- a
+        registered Pydantic instance flows through XCom unchanged. Set to ``True`` when a downstream
+        consumer needs the dict shape.
     """
 
     deserialization_allowed_class_fields: ClassVar[tuple[str, ...]] = ("output_type",)
@@ -526,7 +536,7 @@ class AgentOperator(CancellableAgentRunMixin, BaseOperator, HITLReviewMixin, Usa
         model_id: str | None = None,
         fallback_conn_ids: list[str] | None = None,
         system_prompt: str = "",
-        output_type: type = str,
+        output_type: type | UnionType | Sequence[type] = str,
         toolsets: list[AbstractToolset] | None = None,
         capabilities: list[AgentCapability[Any]] | None = None,
         enable_tool_logging: bool = True,
