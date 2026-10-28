@@ -679,6 +679,7 @@ def get_xcom(
 @router.post(
     "/{dag_id}/{run_id}/{task_id}/{key:path}",
     status_code=status.HTTP_201_CREATED,
+    dependencies=[ExecutionOrDagParseToken, DagInGrantedBundle],
     responses=create_openapi_http_exception_doc(
         [
             (
@@ -725,7 +726,9 @@ def set_xcom(
     mapped_length: Annotated[
         int | None, Query(ge=0, description="Number of mapped tasks this value expands into")
     ] = None,
-    token=_TriggerAwareTIToken,
+    # Dag-parse tokens are admitted so callbacks during parsing can persist XComs; task tokens keep
+    # the trigger-aware rewrite used by deferred tasks. Same pattern as the XCom read endpoints.
+    token: ExecutionToken = _TriggerAwareToken,
 ):
     """Set an Airflow XCom."""
     from airflow.configuration import conf
@@ -850,7 +853,7 @@ def delete_xcom(
 
 
 def _find_writer_id(
-    token: TIToken,
+    token: ExecutionToken,
     *,
     dag_id: str,
     run_id: str,
@@ -860,7 +863,12 @@ def _find_writer_id(
     dag_bag: DBDagBag,
 ) -> UUID | None:
     """Resolve the task instance a write targets with the rule reads use, working from the caller."""
-    caller = session.get(TaskInstance, token.id, execution_options={"include_all_attempts": True})
+    # Dag-parse tokens identify a parsing attempt, not a task instance; resolve by coordinates only.
+    caller = (
+        session.get(TaskInstance, token.id, execution_options={"include_all_attempts": True})
+        if isinstance(token, TIToken)
+        else None
+    )
     # A write admitted for an attempt that has since been archived must stay with that attempt.
     if (
         caller is not None
